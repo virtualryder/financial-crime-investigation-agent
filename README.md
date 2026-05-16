@@ -165,7 +165,7 @@ See [docs/integration-guide.md](docs/integration-guide.md) for step-by-step inte
 
 ### Development: Docker Compose
 ```bash
-git clone https://github.com/your-org/financial-crime-investigation-agent.git
+git clone https://github.com/virtualryder/financial-crime-investigation-agent.git
 cd 01-financial-crime-investigation-agent
 cp .env.example .env
 # Edit .env with your OpenAI API key
@@ -175,27 +175,60 @@ docker compose up
 
 ### Production: AWS Architecture
 
-```mermaid
-graph LR
-    U[Investigator Browser] --> CF[CloudFront CDN]
-    CF --> ALB[Application Load Balancer]
-    ALB --> ECS[ECS Fargate\nStreamlit App]
-    ECS --> BED[AWS Bedrock\nClaude/GPT-4o]
-    ECS --> RDS[(RDS PostgreSQL\nCase Management)]
-    ECS --> DDB[(DynamoDB\nAudit Trail)]
-    ECS --> S3[(S3 + KMS\nDocuments)]
-    ECS --> SM[Secrets Manager\nAPI Keys]
-    ECS --> CW[CloudWatch\nLogs & Monitoring]
+The platform is designed for enterprise deployment on AWS with full data residency, network isolation, and financial-grade security controls. Each customer receives a fully isolated deployment — no shared infrastructure between institutions.
+
+```
+Investigator Browser
+  └─▶ CloudFront + WAF
+        └─▶ Application Load Balancer (Cognito/Okta auth)
+              ├─▶ ECS Fargate — Streamlit UI
+              ├─▶ ECS Fargate — LangGraph Agent Workers  ◀─── SQS Alert Queue ◀─── TMS
+              └─▶ ECS Fargate — MCP Auth Gateway
+                    ├─▶ MCP Server: TMS Connector         → Customer TMS (Actimize/Verafin)
+                    ├─▶ MCP Server: Core Banking          → Customer Core Banking (VPN/PrivateLink)
+                    ├─▶ MCP Server: Watchlist Screener    → World-Check / ComplyAdvantage
+                    ├─▶ MCP Server: Adverse Media         → Dow Jones / LexisNexis
+                    ├─▶ MCP Server: Network Intelligence  → Sayari / OpenCorporates
+                    └─▶ MCP Server: Case Management       → ServiceNow / Actimize CM
+
+Data Layer (Private Subnet):
+  ├─▶ Aurora PostgreSQL  — Case records, SAR metadata
+  ├─▶ DynamoDB           — Immutable audit trail (append-only)
+  ├─▶ S3 Object Lock     — SAR documents (WORM, 5-year BSA retention)
+  └─▶ ElastiCache Redis  — Session cache, MCP rate limiting
+
+Security & Operations:
+  ├─▶ AWS Bedrock        — LLM inference (data stays in AWS, no internet egress)
+  ├─▶ Secrets Manager    — All API credentials (namespaced per customer)
+  ├─▶ KMS               — Per-customer encryption key hierarchy
+  └─▶ CloudWatch         — SLA monitoring, SAR deadline alarms, ops dashboards
 ```
 
-**Key AWS services:**
-- **ECS Fargate**: Serverless containers, auto-scaling, no infrastructure management
-- **AWS Bedrock**: Private LLM API — customer data stays in your AWS account
-- **RDS PostgreSQL**: Durable case management database with 5-year retention
-- **DynamoDB**: High-throughput audit trail storage
-- **S3 + KMS**: Encrypted document storage for SAR files
-- **Secrets Manager**: Secure API key management
-- **CloudWatch**: Monitoring, alerting, and log analysis
+**Key architectural decisions:**
+
+| Service | Why |
+|---------|-----|
+| **ECS Fargate** | Serverless containers — no EC2 patching; scales from 1 to 20 concurrent investigations automatically |
+| **AWS Bedrock** | LLM inference stays within your AWS account — no customer data sent to external AI APIs |
+| **MCP Auth Gateway** | Single authenticated proxy for all third-party API calls — every tool invocation is JWT-validated, role-authorized, rate-limited, and audit-logged |
+| **Cognito + Okta/AD** | SAML federation with the bank's existing Active Directory via Okta — no separate credentials; BSA roles derived from AD group membership |
+| **Aurora PostgreSQL** | Multi-AZ, auto-scaling, supports 5-year BSA record retention with automated backups |
+| **DynamoDB** | Append-only audit trail with IAM policy that denies UpdateItem/DeleteItem — tamper-evident by design |
+| **S3 Object Lock** | WORM compliance mode for filed SAR documents — cannot be deleted or modified for 5 years, even by AWS Support |
+| **SQS + DLQ** | Alert queue absorbs TMS bursts; Dead Letter Queue ensures no alert is silently dropped (regulatory requirement) |
+
+**Authentication flow (Okta + Active Directory):**
+```
+AD Group Membership → Okta (SAML 2.0) → Cognito JWT → ALB session → Application
+                                                     ↘ Bearer token → MCP Auth Gateway
+
+GRP-BSA-Officers      → bsa_role: BSA_OFFICER       (SAR approval, case closure)
+GRP-AML-Investigators → bsa_role: INVESTIGATOR      (investigation, tool access)
+GRP-AML-Auditors      → bsa_role: AUDITOR           (read + audit trail)
+```
+Provisioning = add user to AD group. Deprovisioning = remove from AD group or disable AD account. No accounts managed in AWS directly.
+
+**For the complete deployment walkthrough**, Terraform module reference, per-service configuration, integration setup, customer onboarding checklist, and cost estimates, see [docs/aws-deployment-guide.md](docs/aws-deployment-guide.md).
 
 ---
 
@@ -210,8 +243,8 @@ graph LR
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/financial-crime-investigation-agent.git
-cd 01-financial-crime-investigation-agent
+git clone https://github.com/virtualryder/financial-crime-investigation-agent.git
+cd financial-crime-investigation-agent
 
 # Create virtual environment
 python -m venv venv
@@ -271,9 +304,10 @@ pytest tests/ -v
 │   ├── sample_transactions.json    # Realistic transaction history
 │   └── watchlist_hits.json         # Sample watchlist matches
 ├── docs/
+│   ├── aws-deployment-guide.md     # Full AWS deployment: architecture, Terraform, Okta/AD SSO, MCP auth
+│   ├── integration-guide.md        # Step-by-step system integration playbook (TMS, core banking, etc.)
 │   ├── regulatory-compliance.md    # BSA/AML/OFAC/FinCEN/FATF framework
-│   ├── roi-analysis.md             # $4.2M+ annual savings business case
-│   └── integration-guide.md        # Step-by-step system integration playbook
+│   └── roi-analysis.md             # $4.2M+ annual savings business case
 ├── tests/
 │   ├── test_tools.py               # Unit tests for all tool functions
 │   └── test_graph.py               # Graph and node integration tests
